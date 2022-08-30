@@ -1,0 +1,4 @@
+dataset: AID-imagenet
+dataset_args: {split: test}
+
+load: ./meta-baseline/save/meta_AID-imagenet-5shot_meta-baseline-resnet12_5.5/epoch-last.pth
