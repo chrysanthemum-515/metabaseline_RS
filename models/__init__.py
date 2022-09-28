@@ -5,4 +5,4 @@ from . import resnet
 from . import transformer
 from . import classifier
 from . import meta_baseline
-
+from . import meta_attn_baseline
