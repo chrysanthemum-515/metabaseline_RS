@@ -124,4 +124,3 @@ if __name__ == '__main__':
 
     utils.set_gpu(args.gpu)
     main(config)
-

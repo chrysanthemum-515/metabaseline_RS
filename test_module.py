@@ -1,56 +1,40 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
 import models
 import utils
 import math
-from .models import register
+from models.models import register
 
-@register('meta-attn-baseline')
 class MetaAttnBaseline(nn.Module):
 
     def __init__(self, encoder, encoder_args={}, method='cos',
                  temp=10., temp_learnable=True,
                  # attention params
-                 model_dim=512, patchsz=4, num_heads=8, channels=3):
+                 model_dim=512,patchsz=4,num_heads=8):
         super().__init__()
         self.encoder = models.make(encoder, **encoder_args)
         self.method = method
+        self.kernel = nn.Parameter(torch.randn(model_dim,c,patchsz,patchsz))
         
-        self.patchsz = patchsz
-        self.kernel = nn.Parameter(torch.randn(model_dim,channels,patchsz,patchsz))
-        self.attention = MultiHeadAttention(model_dim,model_dim,model_dim,
-                                            model_dim,num_heads,0.5,
-                                            patchsz,img_height=16)
-        self.get_PN_features = Get_PN_features(split_thresh=0.02)
+        self.attention = MultiHeadAttention(model_dim,model_dim,model_dim,model_dim,num_heads,0.5)
+        
         if temp_learnable:
             self.temp = nn.Parameter(torch.tensor(temp))
         else:
             self.temp = temp
 
-    def _img2emd(self,img,kernel,stride):
-        conv_out = F.conv2d(img,kernel,stride=stride)
-        bs, oc, oh, ow = conv_out.shape
-        embedding = torch.reshape(conv_out,shape=(bs,oc,oh*ow)).transpose(-1,-2)
-        return embedding
-    
     def forward(self, x_shot, x_query):
-        shot_shape = x_shot.shape[:-3]      # (tasks,way,support_shot)
-        query_shape = x_query.shape[:-3]        # (tasks,way*query_shot)
-        img_shape = x_shot.shape[-3:]   # (c,h,w)
+        shot_shape = x_shot.shape[:-3]  # (4,5,5) (tasks,way,shot)
+        query_shape = x_query.shape[:-3]    # (4,75) (tasks,way*shot)
+        img_shape = x_shot.shape[-3:]   # (3,h,w)   (c,h,w)
         
-        x_shot = x_shot.view(-1, *img_shape)     # (tasks*ways*s_shots,3,h,w)
-        x_query = x_query.view(-1, *img_shape)  # (tasks*ways*q_shots,3,h,w)
-        
-        # get attn_weights
-        patch_emd = self._img2emd(img=torch.cat([x_shot, x_query]),kernel=self.kernel,stride=self.patchsz)
+        patch_emd = img2emd(img=x_shot,kernel=kernel,stride=patchsz)
         attn_weights = self.attention(patch_emd,patch_emd,patch_emd,valid_lens=None)
-   
-        x_tot = self.encoder(torch.cat([x_shot, x_query], dim=0))
-        p_feature, n_feature = self.get_PN_features(attn_weights,x_tot)
         
+        x_shot = x_shot.view(-1, *img_shape)     # (100,3,h,w)
+        x_query = x_query.view(-1, *img_shape)  # (300,3,h,w)
+        x_tot = self.encoder(torch.cat([x_shot, x_query], dim=0))
         x_shot, x_query = x_tot[:len(x_shot)], x_tot[-len(x_query):]
         x_shot = x_shot.view(*shot_shape, -1)   # (4,5,5,512)
         x_query = x_query.view(*query_shape, -1)    # (4,75,512)
@@ -60,11 +44,12 @@ class MetaAttnBaseline(nn.Module):
             x_shot = F.normalize(x_shot, dim=-1)
             x_query = F.normalize(x_query, dim=-1)
             metric = 'dot'
-            # ========================================= prototype rectification
-            # logits = F.softmax(utils.compute_logits(x_query, x_shot, metric=metric, temp=self.temp).permute(0,2,1),dim=-2)
-            # perseudo_proto = torch.bmm(logits,x_query) 
-            # x_shot = F.normalize((x_shot + perseudo_proto),dim=-1)
-            # =========================================      
+            #prototype rectification
+            logits = F.softmax(utils.compute_logits(
+                x_query, x_shot, metric=metric, temp=self.temp).permute(0,2,1),dim=-2)
+            perseudo_proto = torch.bmm(logits,x_query) 
+            x_shot = F.normalize((x_shot + perseudo_proto),dim=-1)
+                       
         elif self.method == 'sqr':
             x_shot = x_shot.mean(dim=-2)
             metric = 'sqr'
@@ -73,12 +58,15 @@ class MetaAttnBaseline(nn.Module):
                 x_query, x_shot, metric=metric, temp=self.temp)     # (4,75,5)(tasks,q_way*q_shot,q_way)
         return logits
     
-
+    def img2emd(img,kernel,stride):
+        conv_out = F.conv2d(img,kernel,stride=stride)
+        bs, oc, oh, ow = conv_out.shape
+        embedding = torch.reshape(conv_out,shape=(bs,oc,oh*ow)).transpose(-1,-2)
+        return embedding
+    
 # functions used in Attention Module
 def sequence_mask(X, valid_len, value=0):
-    """Mask irrelevant entries in sequences.
-
-    Defined in :numref:`sec_seq2seq_decoder`"""
+    """Mask irrelevant entries in sequences."""
     maxlen = X.size(1)
     mask = torch.arange((maxlen), dtype=torch.float32,
                         device=X.device)[None, :] < valid_len[:, None]
@@ -104,13 +92,16 @@ def masked_softmax(X, valid_lens):
 def transpose_qkv(X, num_heads):
     """为了多注意力头的并行计算而变换形状"""
     # 输入X的形状:(batch_size，查询或者“键－值”对的个数，num_hiddens)
-    # 输出X的形状:(batch_size，查询或者“键－值”对的个数，num_heads，num_hiddens/num_heads)
+    # 输出X的形状:(batch_size，查询或者“键－值”对的个数，num_heads，
+    # num_hiddens/num_heads)
     X = X.reshape(X.shape[0], X.shape[1], num_heads, -1)
 
-    # 输出X的形状:(batch_size，num_heads，查询或者“键－值”对的个数,num_hiddens/num_heads)
+    # 输出X的形状:(batch_size，num_heads，查询或者“键－值”对的个数,
+    # num_hiddens/num_heads)
     X = X.permute(0, 2, 1, 3)
 
-    # 最终输出的形状:(batch_size*num_heads,查询或者“键－值”对的个数,num_hiddens/num_heads)
+    # 最终输出的形状:(batch_size*num_heads,查询或者“键－值”对的个数,
+    # num_hiddens/num_heads)
     return X.reshape(-1, X.shape[2], X.shape[3])
 
 def transpose_output(X, num_heads):
@@ -134,13 +125,12 @@ class DotProductAttention(nn.Module):
         d = queries.shape[-1]
         # 设置transpose_b=True为了交换keys的最后两个维度
         scores = torch.bmm(queries, keys.transpose(1,2)) / math.sqrt(d)
-        attention_weights = masked_softmax(scores, valid_lens)
-        return self.dropout(attention_weights)
-        # return torch.bmm(self.dropout(attention_weights), values)   
+        self.attention_weights = masked_softmax(scores, valid_lens=None)
+        return self.attention_weights
+        # return torch.bmm(self.dropout(self.attention_weights), values)   
      
 class MultiHeadAttention(nn.Module):
-    def __init__(self,key_size,query_size,value_size,num_hiddens,num_heads,dropout,patchsz,
-                 img_height,
+    def __init__(self,key_size,query_size,value_size,num_hiddens,num_heads,dropout,
                  bias=False,**kwargs):
         super(MultiHeadAttention,self).__init__()
         self.num_heads = num_heads
@@ -149,10 +139,9 @@ class MultiHeadAttention(nn.Module):
         self.w_k = nn.Linear(key_size,num_hiddens,bias=bias)
         self.w_v = nn.Linear(value_size,num_hiddens,bias=bias)
         self.w_o = nn.Linear(num_hiddens,num_hiddens,bias=bias)
-        self.w_o2 = nn.Linear(int(num_heads*((img_height/patchsz)**2)),int((img_height/patchsz)**2))
     
     def forward(self,queries,keys,values,valid_lens):
-        queries = transpose_qkv(self.w_q(queries),self.num_heads)   # [batchsz*num_heads,查询或者“键－值”对的个数,num_hiddens/num_heads]
+        queries = transpose_qkv(self.w_q(queries),self.num_heads)   # [20,21,8]->[40,21,4]
         keys = transpose_qkv(self.w_k(keys),self.num_heads)
         values = transpose_qkv(self.w_v(values),self.num_heads)
         
@@ -160,30 +149,38 @@ class MultiHeadAttention(nn.Module):
             valid_lens = torch.repeat_interleave(valid_lens,
                                                  repeats=self.num_heads,dim=0)
         
-        output = self.attention(queries,keys,values,valid_lens)     # [batchsz*num_heads,num_queries,num_queries]
-
-        output_concat = transpose_output(output,self.num_heads)     # [batchsz,num_queries,num_heads*num_queries]
-        # TODO:这里通过全连接进行多头融合，有没有其他方法的多头融合呢？
-        return self.w_o2(output_concat)
-
-class Get_PN_features(nn.Module):
-    def __init__(self,patch_nums=[32,16], split_thresh=0.5):
-        super().__init__()
-        self.patch_num = patch_nums
-        self.split_thresh = nn.Parameter(torch.tensor(split_thresh))
-        self.info_merge_layer = nn.AdaptiveAvgPool2d((patch_nums[0],patch_nums[1]))
+        # output shape=[batchsz*num_heads,num_queries,num_hiddens/num_heads)
+        output = self.attention(queries,keys,values,valid_lens)
         
-    def forward(self,weight,encoder_out):
-        batchsize, weight_h, weight_w = weight.shape
-        _ , out_dim = encoder_out.shape
-        weight = self.info_merge_layer(weight)  # [bs,patch_n,patch_n]
-        positive_feature = torch.zeros(batchsize,self.patch_num[0],self.patch_num[1]).cuda()
-        negative_feature = torch.zeros(batchsize,self.patch_num[0],self.patch_num[1]).cuda()
-        # TODO: 根据阈值取出对应的正负块
-        mask = weight > self.split_thresh
-        assert out_dim == self.patch_num[0]*self.patch_num[1], 'out_dim must divide patch_num**2' 
-        encoder_out = encoder_out.reshape(batchsize,self.patch_num[0],self.patch_num[1])
-        
-        positive_feature.masked_scatter(mask,encoder_out)
-        negative_feature.masked_scatter(~mask,encoder_out)
-        return positive_feature, negative_feature
+        return output
+        # output_concat = transpose_output(output,self.num_heads)
+        # return self.w_o(output_concat)
+
+
+if __name__ == '__main__':
+    def img2emd(img,kernel,stride):
+        conv_out = F.conv2d(img,kernel,stride=stride)
+        bs, oc, oh, ow = conv_out.shape
+        embedding = torch.reshape(conv_out,shape=(bs,oc,oh*ow)).transpose(-1,-2)
+        return embedding
+    
+    tasks,ways,shots,c,h,w = 4,5,1,3,84,84
+    patchsz = 4
+    model_dim = 512
+    num_heads = 2
+    x_shot = torch.rand((tasks*ways*shots,3,h,w))
+    
+    kernel = torch.randn(model_dim,c,patchsz,patchsz)
+    patch_emd = img2emd(img=x_shot,kernel=kernel,stride=patchsz)
+    attention = MultiHeadAttention(model_dim,model_dim,model_dim,model_dim,num_heads,0.5)
+    attn_weights = attention(patch_emd,patch_emd,patch_emd,valid_lens=None)
+    print('ok')
+    # conv_layer = torch.nn.Conv2d(3,1,3,padding=1)
+    # x_shot = conv_layer(x_shot).squeeze(1)  # [20,84,84]
+    # num_hiddens, num_heads = 512,2
+    # batch_size,num_queries = 4,5    # num_queries = num_patches
+    # attention = MultiHeadAttention(num_hiddens,num_hiddens,num_hiddens,
+    #                                num_hiddens,num_heads,0.5)
+    # X = torch.ones((batch_size,num_queries,num_hiddens))
+    
+    # print(attention(X,X,X,valid_lens=None).shape)

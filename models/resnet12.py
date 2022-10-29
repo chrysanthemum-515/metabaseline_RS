@@ -79,9 +79,8 @@ class ResNet12(nn.Module):
 
     def _make_layer(self, planes):
         downsample = nn.Sequential(
-            conv1x1(self.inplanes, planes),
-            norm_layer(planes),
-        )
+                                    conv1x1(self.inplanes, planes),
+                                    norm_layer(planes),)
         block = Block(self.inplanes, planes, downsample)
         self.inplanes = planes
         return block

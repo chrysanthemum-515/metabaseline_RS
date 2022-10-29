@@ -1,0 +1,25 @@
+train_dataset: NWPU-imagenet
+train_dataset_args: {split: train}
+tval_dataset: NWPU-imagenet
+tval_dataset_args: {split: test}
+val_dataset: NWPU-imagenet
+val_dataset_args: {split: val}
+
+model: meta-attn-baseline
+model_args: 
+    encoder: resnet12
+    encoder_args: {}
+load_encoder: ./save/classifier_NWPU-imagenet_resnet12_/epoch-last.pth
+
+n_way: 5
+n_shot: 1
+n_query: 15
+train_batches: 200
+ep_per_batch: 2
+fs_batch: 200
+
+max_epoch: 25
+optimizer: sgd
+optimizer_args: {lr: 0.001, weight_decay: 5.e-4}
+
+visualize_datasets: False

@@ -17,7 +17,6 @@ import utils
 import utils.few_shot as fs
 from datasets.samplers import CategoriesSampler
 
-
 def main(config):
     svname = args.name
     fs_batch = config['fs_batch']
@@ -38,7 +37,7 @@ def main(config):
 
     n_way, n_shot = config['n_way'], config['n_shot']
     n_query = config['n_query']
-
+    
     if config.get('n_train_way') is not None:
         n_train_way = config['n_train_way']
     else:
@@ -259,9 +258,9 @@ def main(config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config',default='meta-baseline/configs/train_meta_NWPU.yaml')
+    parser.add_argument('--config',default='configs/meta_demo.yaml')
     parser.add_argument('--name', default=None)
-    parser.add_argument('--tag', default='')
+    parser.add_argument('--tag', default='demo')
     parser.add_argument('--gpu', default='3')
     args = parser.parse_args()
 
